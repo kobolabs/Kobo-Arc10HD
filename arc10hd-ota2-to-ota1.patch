@@ -1,0 +1,160 @@
+diff --git a/arch/arm/mach-tegra/common.c b/arch/arm/mach-tegra/common.c
+index 4162d5b..1171ef9 100644
+--- a/arch/arm/mach-tegra/common.c
++++ b/arch/arm/mach-tegra/common.c
+@@ -103,7 +103,7 @@
+ #define   ADDR_BNDRY(x)	(((x) & 0xf) << 21)
+ #define   INACTIVITY_TIMEOUT(x)	(((x) & 0xffff) << 0)
+ 
+-#define DORA_KERNEL_VERSION		"K04.22.20131009"
++#define DORA_KERNEL_VERSION		"K04.23.20131028"
+ #define DORA_MANUFACTURER		"Wistron"
+ 
+ unsigned long tegra_avp_kernel_start;
+diff --git a/drivers/power/bq2419x-charger.c b/drivers/power/bq2419x-charger.c
+index 9c276c6..d0600ed 100644
+--- a/drivers/power/bq2419x-charger.c
++++ b/drivers/power/bq2419x-charger.c
+@@ -100,6 +100,7 @@ struct bq2419x_chip {
+ 	int				chg_enable;
+ };
+ 
++extern int check_external_power(void);
+ struct bq2419x_chip *bq2419x_chip_data;
+ static unsigned long stop_charging_flag = 0;
+ 
+@@ -296,6 +297,24 @@ static int bq2419x_get_battery_status(void)
+ 		return -EINVAL;
+ }
+ 
++static int bq2419x_get_battery_current(void)
++{
++	char name[]= "bq27541-bat";
++	int result = 0;
++	struct power_supply *psy = power_supply_get_by_name(name);
++	union power_supply_propval current_now;
++
++	if (!psy)
++		return -ENXIO;
++
++	result = psy->get_property(psy,POWER_SUPPLY_PROP_CURRENT_NOW, &current_now);
++	if(!result) {
++		printk("The battery current is %d\n",current_now.intval);
++		return current_now.intval;
++	}
++	else
++		return -EINVAL;
++}
+ static int bq2419x_get_battery_capacity(void)
+ {
+ 	char name[]= "bq27541-bat";
+@@ -334,7 +353,7 @@ static void bq2419x_charger_termination_config(struct bq2419x_chip *bq2419x, int
+ 	if (ret < 0) {
+ 		dev_err(bq2419x->dev, "error reading reg: 0x%x\n", BQ2419X_TIME_CTRL_REG);
+ 		val = 0x9a;
+-	}	
++	}
+ 
+ 	if (charge_termination_enable)
+ 		val |= 0x80;
+@@ -344,7 +363,18 @@ static void bq2419x_charger_termination_config(struct bq2419x_chip *bq2419x, int
+ 	ret = regmap_write(bq2419x->regmap, BQ2419X_TIME_CTRL_REG, val);
+ 	if (ret < 0)
+ 		dev_err(bq2419x->dev, "TIME_CTRL_REG write failed %d\n", ret);
+-		
++
++	ret = regmap_read(bq2419x->regmap, BQ2419X_VOLT_CTRL_REG, &val);
++	if (ret < 0)
++		dev_err(bq2419x->dev, "error reading reg: 0x%x\n", BQ2419X_VOLT_CTRL_REG);
++
++	val &= ~0xfc; //clear charge voltage limit register.
++	val |= 0xc4; //Config charge voltage limit to 4288mV.
++
++	ret = regmap_write(bq2419x->regmap, BQ2419X_VOLT_CTRL_REG, val);
++	if (ret < 0)
++		dev_err(bq2419x->dev, "BQ2419X_VOLT_CTRL_REG write failed %d\n", ret);
++
+ 	return;
+ }
+ 
+@@ -1333,6 +1363,24 @@ static void bq2419x_shutdown(struct i2c_client *client)
+ 		dev_err(bq2419x->dev, "RTC wake alarm config failed %d\n", ret);
+ }
+ 
++void bq2419x_dump_register(struct bq2419x_chip *bq2419x)
++{
++	unsigned int i = 0;
++	int ret = 0;
++	unsigned int val;
++
++	bq2419x_get_battery_current();
++	for (i = 0; i < 10; i++) {
++		ret = regmap_read(bq2419x->regmap, i, &val);
++		if (ret < 0)
++			dev_err(bq2419x->dev, "error reading reg: 0x%x\n", i);
++		else
++			dev_info(bq2419x->dev, "%s-reg%x = 0x%x\n", __func__, i, val);
++	}
++
++	return;
++}
++
+ #ifdef CONFIG_PM_SLEEP
+ static int bq2419x_suspend(struct device *dev)
+ {
+@@ -1379,7 +1427,6 @@ static int bq2419x_suspend(struct device *dev)
+ 	return 0;
+ }
+ 
+-extern int check_external_power(void);
+ static int bq2419x_resume(struct device *dev)
+ {
+ 	int ret = 0;
+diff --git a/drivers/video/tegra/dc/hdmi.c b/drivers/video/tegra/dc/hdmi.c
+index b23da66..50658a8 100644
+--- a/drivers/video/tegra/dc/hdmi.c
++++ b/drivers/video/tegra/dc/hdmi.c
+@@ -851,6 +851,7 @@ bool tegra_dc_hdmi_detect_test(struct tegra_dc *dc, unsigned char *edid_ptr)
+ 	int err;
+ 	struct fb_monspecs specs;
+ 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
++  int retry = 0;
+ 
+ 	if (!hdmi || !edid_ptr) {
+ 		dev_err(&dc->ndev->dev, "HDMI test failed to get arguments.\n");
+@@ -858,6 +859,13 @@ bool tegra_dc_hdmi_detect_test(struct tegra_dc *dc, unsigned char *edid_ptr)
+ 	}
+ 
+ 	err = tegra_edid_get_monspecs_test(hdmi->edid, &specs, edid_ptr);
++
++  while((retry++ < 3) && (err < 0)){
++    printk("%s retry (%d)", __func__, retry);
++    msleep(100);
++	  err = tegra_edid_get_monspecs_test(hdmi->edid, &specs, edid_ptr);
++  }
++
+ 	if (err < 0) {
+ 		/* Check if there's a hard-wired mode, if so, enable it */
+ 		if (dc->out->n_modes)
+@@ -902,6 +910,7 @@ static bool tegra_dc_hdmi_detect(struct tegra_dc *dc)
+ 	struct tegra_dc_hdmi_data *hdmi = tegra_dc_get_outdata(dc);
+ 	struct fb_monspecs specs;
+ 	int err;
++  int retry = 0;
+ 
+ 	mutex_lock(&dc->lock);
+ 
+@@ -912,6 +921,13 @@ static bool tegra_dc_hdmi_detect(struct tegra_dc *dc)
+ 		goto success;
+ 
+ 	err = tegra_edid_get_monspecs(hdmi->edid, &specs);
++
++  while((retry++ < 3) && (err < 0)){
++    printk("%s retry (%d)", __func__, retry);
++    msleep(100);
++	  err = tegra_edid_get_monspecs(hdmi->edid, &specs);
++  }
++
+ 	if (err < 0) {
+ 		if (dc->out->n_modes)
+ 			tegra_dc_enable(dc);
